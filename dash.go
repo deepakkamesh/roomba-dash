@@ -2,9 +2,11 @@ package dash
 
 import (
 	"fmt"
+	"math"
 	"time"
 
 	ui "github.com/gizak/termui"
+	"github.com/golang/glog"
 	"github.com/xa4a/go-roomba"
 	"github.com/xa4a/go-roomba/constants"
 )
@@ -31,7 +33,7 @@ type Dash struct {
 }
 
 // Init initializes a a new dashboard.
-func Init(gui bool, tty string) (*Dash, error) {
+func Init(gui bool, tty string, brc string) (*Dash, error) {
 
 	m := Dash{
 		Id: "dkg",
@@ -39,11 +41,13 @@ func Init(gui bool, tty string) (*Dash, error) {
 
 	// Initialize Roomba.
 	if tty != "" {
-		r, err := roomba.MakeRoomba(tty)
+		r, err := roomba.MakeRoomba(tty, brc)
 		if err != nil {
 			return nil, fmt.Errorf("unable to make Roomba %v", err)
 		}
-		r.Start()
+		if err := r.Start(true); err != nil {
+			return nil, err
+		}
 		m.roomba = r
 	}
 
@@ -143,27 +147,12 @@ func (m *Dash) Build() error {
 	m.battMeter.BarColor = ui.ColorGreen
 	m.battMeter.PercentColorHighlighted = ui.ColorBlack
 
-	m.battLvl.BorderLabel = "Batt Level (mAh)"
-	m.battLvl.Data = []float64{}
+	m.battLvl.BorderLabel = "Batt Level (%)"
+	m.battLvl.Data = []float64{0}
 	m.battLvl.Height = 12
-	m.battLvl.Mode = "dot"
+	//m.battLvl.Mode = "dot"
 	m.battLvl.AxesColor = ui.ColorWhite
 	m.battLvl.LineColor = ui.ColorGreen | ui.AttrBold
-
-	// IRCode.
-	m.irCode.Rows = [][]string{
-		[]string{"IR Code", ""},
-		[]string{"Omni", "1023"},
-		[]string{"Left", ""},
-		[]string{"Right", ""},
-	}
-	m.irCode.FgColor = ui.ColorWhite
-	m.irCode.BgColor = ui.ColorDefault
-	m.irCode.TextAlign = ui.AlignCenter
-	m.irCode.Separator = false
-	m.irCode.Border = true
-	m.irCode.Analysis()
-	m.irCode.SetSize()
 
 	// Battery data.
 	m.battState.Rows = [][]string{
@@ -180,6 +169,21 @@ func (m *Dash) Build() error {
 	m.battState.Analysis()
 	m.battState.SetSize()
 	m.battState.Border = true
+
+	// IRCode.
+	m.irCode.Rows = [][]string{
+		[]string{"IR Code", ""},
+		[]string{"Omni", "1023"},
+		[]string{"Left", ""},
+		[]string{"Right", ""},
+	}
+	m.irCode.FgColor = ui.ColorWhite
+	m.irCode.BgColor = ui.ColorDefault
+	m.irCode.TextAlign = ui.AlignCenter
+	m.irCode.Separator = false
+	m.irCode.Border = true
+	m.irCode.Analysis()
+	m.irCode.SetSize()
 
 	// OverCurrent Data.
 	m.ocSensor.Rows = [][]string{
@@ -231,6 +235,7 @@ func (m *Dash) Build() error {
 	m.cliffSensor.BgColor = ui.ColorDefault
 	m.cliffSensor.TextAlign = ui.AlignCenter
 	m.cliffSensor.Separator = false
+	m.cliffSensor.Height = 11
 	m.cliffSensor.Analysis()
 	m.cliffSensor.SetSize()
 	m.cliffSensor.Border = true
@@ -309,9 +314,6 @@ func (m *Dash) Run() error {
 
 	ui.Handle("/sys/kbd/d", func(ui.Event) {
 		m.roomba.Power()
-	})
-
-	ui.Handle("/sys/kbd/q", func(ui.Event) {
 		ui.StopLoop()
 	})
 
@@ -332,6 +334,10 @@ func (m *Dash) Run() error {
 }
 
 func (m *Dash) Update() error {
+
+	if m.roomba == nil {
+		return fmt.Errorf("roomba not initialized")
+	}
 
 	t := time.NewTicker(1000 * time.Millisecond)
 	sg := []byte{constants.SENSOR_GROUP_6, constants.SENSOR_GROUP_101}
@@ -367,6 +373,9 @@ func (m *Dash) Update() error {
 }
 
 func (m *Dash) UpdateGUI() error {
+	if m.roomba == nil {
+		return fmt.Errorf("roomba not initialized")
+	}
 
 	battMaxPlot := 0
 	var battCap uint16
@@ -383,9 +392,12 @@ func (m *Dash) UpdateGUI() error {
 		// Iterate through the packet groups. Sensor group 100 does not work as advertised.
 		// Use sensor group, 6 and 101 instead.
 		for grp := 0; grp < 2; grp++ {
+			// TODO: Need a timeout to return from function.
 			d, e := m.roomba.Sensors(sg[grp])
 			if e != nil {
-				return e
+				// TODO: Log Error and continue.
+				glog.Errorf("Error reading sensors %v", e)
+				continue
 			}
 			i := byte(0)
 
@@ -411,18 +423,18 @@ func (m *Dash) UpdateGUI() error {
 					m.battState.Rows[4][1] = ch
 
 				case constants.SENSOR_BATTERY_CHARGE:
-					battMaxPlot = battMaxPlot + 1
 					bc := uint16(d[i])<<8 | uint16(d[i+1])
-					m.battLvl.Data = append(m.battLvl.Data, float64(bc))
-					if battMaxPlot > 50 {
-						m.battLvl.Data = []float64{}
-						battMaxPlot = 0
-					}
+					battMaxPlot = battMaxPlot + 1
 					perc := float64(0)
 					if battCap > 0 {
 						perc = float64(bc) * 100 / float64(battCap)
 					}
-
+					if battMaxPlot%20 == 0 {
+						m.battLvl.Data = append(m.battLvl.Data, toFixed(perc, 2))
+						if battMaxPlot%1200 == 0 {
+							m.battLvl.Data = []float64{}
+						}
+					}
 					m.battMeter.Percent = int(perc)
 					m.battMeter.Label = fmt.Sprintf(" %.2f%% %d/%d mAh", perc, bc, battCap)
 
@@ -505,6 +517,22 @@ func (m *Dash) UpdateGUI() error {
 					}
 					m.cliffSensor.BgColors[5] = ui.ColorDefault
 
+				case constants.SENSOR_WHEEL_OVERCURRENT:
+					m.ocSensor.BgColors[1] = ui.ColorDefault
+					m.ocSensor.BgColors[2] = ui.ColorDefault
+					m.ocSensor.BgColors[3] = ui.ColorDefault
+					m.ocSensor.BgColors[4] = ui.ColorDefault
+					switch {
+					case d[i]&1 > 0:
+						m.ocSensor.BgColors[4] = ui.ColorRed
+					case d[i]&4 > 0:
+						m.ocSensor.BgColors[3] = ui.ColorRed
+					case d[i]&8 > 0:
+						m.ocSensor.BgColors[2] = ui.ColorRed
+					case d[i]&16 > 0:
+						m.ocSensor.BgColors[1] = ui.ColorRed
+					}
+
 				case constants.SENSOR_BUMPER:
 					idx := 1
 					for offset := byte(1); offset <= 32; offset = offset << 1 {
@@ -533,6 +561,26 @@ func (m *Dash) UpdateGUI() error {
 				case constants.SENSOR_BUMP_RIGHT:
 					m.bumpSensor.Rows[6][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
 
+				case constants.SENSOR_LEFT_MOTOR_CURRENT:
+					m.currSensor.Data[0] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_RIGHT_MOTOR_CURRENT:
+					m.currSensor.Data[1] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_MAIN_BRUSH_MOTOR_CURRENT:
+					m.currSensor.Data[2] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_SIDE_BRUSH_MOTOR_CURRENT:
+					m.currSensor.Data[3] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_REQUESTED_VELOCITY:
+					m.velSensor.Data[0] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_REQUESTED_RIGHT_VELOCITY:
+					m.velSensor.Data[1] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_REQUESTED_LEFT_VELOCITY:
+					m.velSensor.Data[2] = int(int16(d[i])<<8 | int16(d[i+1]))
 				}
 
 				i = i + constants.SENSOR_PACKET_LENGTH[p]
@@ -543,4 +591,13 @@ func (m *Dash) UpdateGUI() error {
 		}
 	}
 	return nil
+}
+
+func round(num float64) int {
+	return int(num + math.Copysign(0.5, num))
+}
+
+func toFixed(num float64, precision int) float64 {
+	output := math.Pow(10, float64(precision))
+	return float64(round(num*output)) / output
 }
