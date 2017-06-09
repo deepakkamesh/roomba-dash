@@ -18,12 +18,14 @@ type Dash struct {
 	tmstmp      *ui.Par
 	head        *ui.Par
 	modeDisp    *ui.Par
+	stasis      *ui.Par
 	cmd         *ui.List
 	irCode      *ui.Table
 	movSensor   *ui.BarChart
 	velSensor   *ui.BarChart
 	currSensor  *ui.BarChart
 	battMeter   *ui.Gauge
+	dirtLvl     *ui.Gauge
 	battLvl     *ui.LineChart
 	battState   *ui.Table
 	ocSensor    *ui.Table
@@ -60,12 +62,14 @@ func Init(gui bool, tty string, brc string) (*Dash, error) {
 		m.head = ui.NewPar("")
 		m.tmstmp = ui.NewPar("")
 		m.modeDisp = ui.NewPar("")
+		m.stasis = ui.NewPar("")
 		m.cmd = ui.NewList()
 		m.irCode = ui.NewTable()
 		m.movSensor = ui.NewBarChart()
 		m.velSensor = ui.NewBarChart()
 		m.currSensor = ui.NewBarChart()
 		m.battMeter = ui.NewGauge()
+		m.dirtLvl = ui.NewGauge()
 		m.battLvl = ui.NewLineChart()
 		m.battState = ui.NewTable()
 		m.ocSensor = ui.NewTable()
@@ -87,6 +91,8 @@ func (m *Dash) Build() error {
 
 	m.modeDisp.Height = 3
 
+	m.stasis.Height = 3
+
 	// Command list.
 	m.cmd.Items = []string{
 		"[↑] Move forward",
@@ -98,9 +104,10 @@ func (m *Dash) Build() error {
 		"[s] Safe Mode",
 		"[o] Stop",
 		"[d] Power Down",
+		"[k] Seek Dock",
 	}
 	m.cmd.ItemFgColor = ui.ColorYellow
-	m.cmd.Height = 12
+	m.cmd.Height = 13
 	m.cmd.BorderLabel = "Commands"
 	m.cmd.Align()
 
@@ -138,6 +145,15 @@ func (m *Dash) Build() error {
 	m.currSensor.BarWidth = 5
 	m.currSensor.Align()
 
+	// Dirtlevel 0-255
+	m.dirtLvl.Percent = 0
+	m.dirtLvl.Height = 3
+	m.dirtLvl.BorderLabel = "Dirt Level"
+	m.dirtLvl.Label = "({{percent}}%) dirt detection"
+	m.dirtLvl.PercentColor = ui.ColorYellow
+	m.dirtLvl.BarColor = ui.ColorGreen
+	m.dirtLvl.PercentColorHighlighted = ui.ColorBlack
+
 	// Battery state gauges.
 	m.battMeter.Percent = 50
 	m.battMeter.Height = 3
@@ -149,7 +165,7 @@ func (m *Dash) Build() error {
 
 	m.battLvl.BorderLabel = "Batt Level (%)"
 	m.battLvl.Data = []float64{0}
-	m.battLvl.Height = 12
+	m.battLvl.Height = 13
 	//m.battLvl.Mode = "dot"
 	m.battLvl.AxesColor = ui.ColorWhite
 	m.battLvl.LineColor = ui.ColorGreen | ui.AttrBold
@@ -184,6 +200,7 @@ func (m *Dash) Build() error {
 	m.irCode.Border = true
 	m.irCode.Analysis()
 	m.irCode.SetSize()
+	m.irCode.Height = 10
 
 	// OverCurrent Data.
 	m.ocSensor.Rows = [][]string{
@@ -221,6 +238,7 @@ func (m *Dash) Build() error {
 	m.bumpSensor.BgColors[1] = ui.ColorRed
 	m.bumpSensor.BgColors[3] = ui.ColorRed
 	m.bumpSensor.Border = true
+	m.bumpSensor.Height = 10
 
 	// Cliff sensors.
 	m.cliffSensor.Rows = [][]string{
@@ -235,18 +253,18 @@ func (m *Dash) Build() error {
 	m.cliffSensor.BgColor = ui.ColorDefault
 	m.cliffSensor.TextAlign = ui.AlignCenter
 	m.cliffSensor.Separator = false
-	m.cliffSensor.Height = 11
 	m.cliffSensor.Analysis()
 	m.cliffSensor.SetSize()
 	m.cliffSensor.Border = true
+	m.cliffSensor.Height = 10
 
 	// External Sensors.
 	m.wheelSensor.Rows = [][]string{
 		[]string{"Wheel Sensor"},
-		[]string{"Right Drop"},
-		[]string{"Right Drop"},
-		[]string{"Left Bump"},
 		[]string{"Right Bump"},
+		[]string{"Left Bump"},
+		[]string{"Right Drop"},
+		[]string{"Left Drop"},
 	}
 	m.wheelSensor.FgColor = ui.ColorWhite
 	m.wheelSensor.BgColor = ui.ColorDefault
@@ -257,6 +275,7 @@ func (m *Dash) Build() error {
 	m.wheelSensor.BgColors[1] = ui.ColorRed
 	m.wheelSensor.BgColors[3] = ui.ColorRed
 	m.wheelSensor.Border = true
+	m.wheelSensor.Height = 10
 
 	// Align widgets.
 	ui.Body.AddRows(
@@ -266,8 +285,8 @@ func (m *Dash) Build() error {
 		),
 		ui.NewRow(
 			ui.NewCol(2, 0, m.cmd),
-			ui.NewCol(3, 0, m.battMeter, m.battState),
-			ui.NewCol(2, 0, m.modeDisp, m.ocSensor),
+			ui.NewCol(3, 0, m.battMeter, m.battState, m.dirtLvl),
+			ui.NewCol(2, 0, m.modeDisp, m.ocSensor, m.stasis),
 			ui.NewCol(5, 0, m.battLvl),
 		),
 		ui.NewRow(
@@ -296,6 +315,42 @@ func (m *Dash) Run() error {
 	ui.Body.Align()
 	ui.Render(ui.Body)
 
+	ui.Handle("sys/kbd/<down>", func(ui.Event) {
+		m.roomba.Drive(-100, 32767)
+		go func() {
+			t := time.Tick(500 * time.Millisecond)
+			<-t
+			m.roomba.Drive(0, 0)
+		}()
+	})
+
+	ui.Handle("sys/kbd/<left>", func(ui.Event) {
+		m.roomba.Drive(50, 1)
+		go func() {
+			t := time.Tick(500 * time.Millisecond)
+			<-t
+			m.roomba.Drive(0, 0)
+		}()
+	})
+
+	ui.Handle("sys/kbd/<right>", func(ui.Event) {
+		m.roomba.Drive(50, -1)
+		go func() {
+			t := time.Tick(500 * time.Millisecond)
+			<-t
+			m.roomba.Drive(0, 0)
+		}()
+	})
+
+	ui.Handle("sys/kbd/<up>", func(ui.Event) {
+		m.roomba.Drive(100, 32767)
+		go func() {
+			t := time.Tick(500 * time.Millisecond)
+			<-t
+			m.roomba.Drive(0, 0)
+		}()
+	})
+
 	ui.Handle("/sys/kbd/p", func(ui.Event) {
 		m.roomba.Passive()
 
@@ -308,12 +363,19 @@ func (m *Dash) Run() error {
 		m.roomba.Stop()
 	})
 
+	ui.Handle("/sys/kbd/k", func(ui.Event) {
+		m.roomba.SeekDock()
+	})
+
 	ui.Handle("/sys/kbd/f", func(ui.Event) {
 		m.roomba.Full()
 	})
 
 	ui.Handle("/sys/kbd/d", func(ui.Event) {
-		m.roomba.Power()
+		if m.roomba != nil {
+			m.roomba.Power()
+		}
+		glog.Flush()
 		ui.StopLoop()
 	})
 
@@ -533,6 +595,16 @@ func (m *Dash) UpdateGUI() error {
 						m.ocSensor.BgColors[1] = ui.ColorRed
 					}
 
+				case constants.SENSOR_BUMP_WHEELS_DROPS:
+					idx := 1
+					for offset := byte(1); offset <= 8; offset = offset << 1 {
+						m.wheelSensor.BgColors[idx] = ui.ColorDefault
+						if d[i]&offset > 0 {
+							m.wheelSensor.BgColors[idx] = ui.ColorRed
+						}
+						idx++
+					}
+
 				case constants.SENSOR_BUMPER:
 					idx := 1
 					for offset := byte(1); offset <= 32; offset = offset << 1 {
@@ -581,8 +653,33 @@ func (m *Dash) UpdateGUI() error {
 
 				case constants.SENSOR_REQUESTED_LEFT_VELOCITY:
 					m.velSensor.Data[2] = int(int16(d[i])<<8 | int16(d[i+1]))
-				}
 
+				case constants.SENSOR_STASIS:
+					switch d[i] {
+					case 0:
+						m.stasis.Text = "Stasis:BWD/TURN"
+					case 1:
+						m.stasis.Text = "Stasis:FWD"
+					}
+
+				case constants.SENSOR_DIRT_DETECT:
+					m.dirtLvl.Percent = int(d[i] * 100 / 255)
+
+				case constants.SENSOR_ANGLE:
+					m.movSensor.Data[3] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_DISTANCE:
+					m.movSensor.Data[4] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_REQUESTED_RADIUS:
+					m.movSensor.Data[2] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_LEFT_ENCODER:
+					m.movSensor.Data[0] = int(int16(d[i])<<8 | int16(d[i+1]))
+
+				case constants.SENSOR_RIGHT_ENCODER:
+					m.movSensor.Data[1] = int(int16(d[i])<<8 | int16(d[i+1]))
+				}
 				i = i + constants.SENSOR_PACKET_LENGTH[p]
 			}
 			ui.Body.Align()
