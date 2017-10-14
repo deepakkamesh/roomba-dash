@@ -5,6 +5,8 @@ import (
 	"math"
 	"time"
 
+	"gobot.io/x/gobot/drivers/gpio"
+
 	roomba "github.com/deepakkamesh/go-roomba"
 	"github.com/deepakkamesh/go-roomba/constants"
 	ui "github.com/gizak/termui"
@@ -35,7 +37,7 @@ type Dash struct {
 }
 
 // Init initializes a a new dashboard.
-func Init(gui bool, tty string, brc string) (*Dash, error) {
+func Init(gui bool, tty string, brc *gpio.DirectPinDriver) (*Dash, error) {
 
 	m := Dash{
 		Id: "dkg",
@@ -47,7 +49,7 @@ func Init(gui bool, tty string, brc string) (*Dash, error) {
 		if err != nil {
 			return nil, fmt.Errorf("unable to make Roomba %v", err)
 		}
-		if err := r.Start(true); err != nil {
+		if err := r.Start(false); err != nil {
 			return nil, err
 		}
 		m.roomba = r
@@ -395,6 +397,34 @@ func (m *Dash) Run() error {
 	return nil
 }
 
+func (m *Dash) Update2() error {
+	t := time.NewTicker(1000 * time.Millisecond)
+
+	for {
+		<-t.C
+
+		d, e := m.roomba.QueryList(constants.PACKET_GROUP_100)
+		if e != nil {
+			fmt.Printf("Error %v", e)
+			return e
+		}
+
+		for i, p := range d {
+
+			pktID := constants.PACKET_GROUP_100[i]
+
+			if len(p) == 1 {
+				fmt.Printf("%25s:  %v \n", constants.SENSORS_NAME[pktID], p[0])
+				continue
+			}
+
+			fmt.Printf("%25s:  %v \n", constants.SENSORS_NAME[pktID], int16(p[0])<<8|int16(p[1]))
+		}
+	}
+
+}
+
+// TODO: update using sensor group query. Fails on pi.
 func (m *Dash) Update() error {
 
 	if m.roomba == nil {
@@ -413,6 +443,7 @@ func (m *Dash) Update() error {
 		// Use sensor group, 6 and 101 instead.
 		for grp := 0; grp < 2; grp++ {
 			d, e := m.roomba.Sensors(sg[grp])
+			fmt.Println("Raw:%v Len:%v", d, len(d))
 			if e != nil {
 				return e
 			}
@@ -443,244 +474,236 @@ func (m *Dash) UpdateGUI() error {
 	var battCap uint16
 
 	t := time.NewTicker(300 * time.Millisecond)
-	sg := []byte{constants.SENSOR_GROUP_6, constants.SENSOR_GROUP_101}
-	pg := [][]byte{constants.PACKET_GROUP_6, constants.PACKET_GROUP_101}
 
 	for {
 
 		<-t.C
 		m.tmstmp.Text = fmt.Sprintf(time.Now().Format("2006/01/02 - 15-04-05"))
 
-		// Iterate through the packet groups. Sensor group 100 does not work as advertised.
-		// Use sensor group, 6 and 101 instead.
-		for grp := 0; grp < 2; grp++ {
-			// TODO: Need a timeout to return from function.
-			d, e := m.roomba.Sensors(sg[grp])
-			if e != nil {
-				// TODO: Log Error and continue.
-				glog.Errorf("Error reading sensors %v", e)
-				continue
-			}
-			i := byte(0)
+		// TODO: Need a timeout to return from function.
+		data, e := m.roomba.QueryList(constants.PACKET_GROUP_3)
+		if e != nil {
+			glog.Errorf("Error reading sensors %v", e)
+			continue
+		}
 
-			for _, p := range pg[grp] {
-				switch p {
-				case constants.SENSOR_TEMPERATURE:
-					m.battState.Rows[1][1] = fmt.Sprintf("%d", d[i])
+		for i, d := range data {
+			pktID := constants.PACKET_GROUP_3[i]
+			switch pktID {
+			case constants.SENSOR_TEMPERATURE:
+				m.battState.Rows[1][1] = fmt.Sprintf("%d", d[0])
 
-				case constants.SENSOR_VOLTAGE:
-					m.battState.Rows[2][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
+			case constants.SENSOR_VOLTAGE:
+				m.battState.Rows[2][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
 
-				case constants.SENSOR_CURRENT:
-					m.battState.Rows[3][1] = fmt.Sprintf("%d", int16(d[i])<<8|int16(d[i+1]))
+			case constants.SENSOR_CURRENT:
+				m.battState.Rows[3][1] = fmt.Sprintf("%d", int16(d[0])<<8|int16(d[1]))
 
-				case constants.SENSOR_BATTERY_CAPACITY:
-					battCap = uint16(d[i])<<8 | uint16(d[i+1])
+			case constants.SENSOR_BATTERY_CAPACITY:
+				battCap = uint16(d[0])<<8 | uint16(d[1])
 
-				case constants.SENSOR_CHARGING:
-					ch, ok := constants.CHARGING_STATE[d[i]]
-					if !ok {
-						m.battState.Rows[4][1] = "Unknown"
-					}
-					m.battState.Rows[4][1] = ch
-
-				case constants.SENSOR_BATTERY_CHARGE:
-					bc := uint16(d[i])<<8 | uint16(d[i+1])
-					battMaxPlot = battMaxPlot + 1
-					perc := float64(0)
-					if battCap > 0 {
-						perc = float64(bc) * 100 / float64(battCap)
-					}
-					if battMaxPlot%20 == 0 {
-						m.battLvl.Data = append(m.battLvl.Data, toFixed(perc, 2))
-						if battMaxPlot%1200 == 0 {
-							m.battLvl.Data = []float64{}
-						}
-					}
-					m.battMeter.Percent = int(perc)
-					m.battMeter.Label = fmt.Sprintf(" %.2f%% %d/%d mAh", perc, bc, battCap)
-
-				case constants.SENSOR_IR_OMNI:
-					n, ok := constants.IR_CODE_NAMES[d[i]]
-					if !ok {
-						n = "unknown"
-					}
-					m.irCode.Rows[1][1] = n
-
-				case constants.SENSOR_IR_LEFT:
-					n, ok := constants.IR_CODE_NAMES[d[i]]
-					if !ok {
-						n = "unknown"
-					}
-					m.irCode.Rows[2][1] = n
-
-				case constants.SENSOR_IR_RIGHT:
-					n, ok := constants.IR_CODE_NAMES[d[i]]
-					if !ok {
-						n = "unknown"
-					}
-					m.irCode.Rows[3][1] = n
-
-				case constants.SENSOR_OI_MODE:
-					mode, ok := constants.OI_MODE[d[i]]
-					if !ok {
-						m.modeDisp.Text = "Unknown Mode"
-						break
-					}
-					m.modeDisp.Text = "Mode:" + mode
-
-				case constants.SENSOR_CLIFF_LEFT_SIGNAL:
-					m.cliffSensor.Rows[1][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_CLIFF_FRONT_LEFT_SIGNAL:
-					m.cliffSensor.Rows[2][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_CLIFF_FRONT_RIGHT_SIGNAL:
-					m.cliffSensor.Rows[3][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_CLIFF_RIGHT_SIGNAL:
-					m.cliffSensor.Rows[4][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_WALL_SIGNAL:
-					m.cliffSensor.Rows[5][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_CLIFF_LEFT:
-					if d[i] == 1 {
-						m.cliffSensor.BgColors[1] = ui.ColorRed
-						break
-					}
-					m.cliffSensor.BgColors[1] = ui.ColorDefault
-
-				case constants.SENSOR_CLIFF_FRONT_LEFT:
-					if d[i] == 1 {
-						m.cliffSensor.BgColors[2] = ui.ColorRed
-						break
-					}
-					m.cliffSensor.BgColors[2] = ui.ColorDefault
-
-				case constants.SENSOR_CLIFF_FRONT_RIGHT:
-					if d[i] == 1 {
-						m.cliffSensor.BgColors[3] = ui.ColorRed
-						break
-					}
-					m.cliffSensor.BgColors[3] = ui.ColorDefault
-
-				case constants.SENSOR_CLIFF_RIGHT:
-					if d[i] == 1 {
-						m.cliffSensor.BgColors[4] = ui.ColorRed
-						break
-					}
-					m.cliffSensor.BgColors[4] = ui.ColorDefault
-
-				case constants.SENSOR_WALL:
-					if d[i] == 1 {
-						m.cliffSensor.BgColors[5] = ui.ColorRed
-						break
-					}
-					m.cliffSensor.BgColors[5] = ui.ColorDefault
-
-				case constants.SENSOR_WHEEL_OVERCURRENT:
-					m.ocSensor.BgColors[1] = ui.ColorDefault
-					m.ocSensor.BgColors[2] = ui.ColorDefault
-					m.ocSensor.BgColors[3] = ui.ColorDefault
-					m.ocSensor.BgColors[4] = ui.ColorDefault
-					switch {
-					case d[i]&1 > 0:
-						m.ocSensor.BgColors[4] = ui.ColorRed
-					case d[i]&4 > 0:
-						m.ocSensor.BgColors[3] = ui.ColorRed
-					case d[i]&8 > 0:
-						m.ocSensor.BgColors[2] = ui.ColorRed
-					case d[i]&16 > 0:
-						m.ocSensor.BgColors[1] = ui.ColorRed
-					}
-
-				case constants.SENSOR_BUMP_WHEELS_DROPS:
-					idx := 1
-					for offset := byte(1); offset <= 8; offset = offset << 1 {
-						m.wheelSensor.BgColors[idx] = ui.ColorDefault
-						if d[i]&offset > 0 {
-							m.wheelSensor.BgColors[idx] = ui.ColorRed
-						}
-						idx++
-					}
-
-				case constants.SENSOR_BUMPER:
-					idx := 1
-					for offset := byte(1); offset <= 32; offset = offset << 1 {
-						m.bumpSensor.BgColors[idx] = ui.ColorDefault
-						if d[i]&offset > 0 {
-							m.bumpSensor.BgColors[idx] = ui.ColorRed
-						}
-						idx++
-					}
-
-				case constants.SENSOR_BUMP_LEFT:
-					m.bumpSensor.Rows[1][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_BUMP_FRONT_LEFT:
-					m.bumpSensor.Rows[2][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_BUMP_CENTER_LEFT:
-					m.bumpSensor.Rows[3][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_BUMP_CENTER_RIGHT:
-					m.bumpSensor.Rows[4][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_BUMP_FRONT_RIGHT:
-					m.bumpSensor.Rows[5][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_BUMP_RIGHT:
-					m.bumpSensor.Rows[6][1] = fmt.Sprintf("%d", uint16(d[i])<<8|uint16(d[i+1]))
-
-				case constants.SENSOR_LEFT_MOTOR_CURRENT:
-					m.currSensor.Data[0] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_RIGHT_MOTOR_CURRENT:
-					m.currSensor.Data[1] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_MAIN_BRUSH_MOTOR_CURRENT:
-					m.currSensor.Data[2] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_SIDE_BRUSH_MOTOR_CURRENT:
-					m.currSensor.Data[3] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_REQUESTED_VELOCITY:
-					m.velSensor.Data[0] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_REQUESTED_RIGHT_VELOCITY:
-					m.velSensor.Data[1] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_REQUESTED_LEFT_VELOCITY:
-					m.velSensor.Data[2] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_STASIS:
-					switch d[i] {
-					case 0:
-						m.stasis.Text = "Stasis:BWD/TURN"
-					case 1:
-						m.stasis.Text = "Stasis:FWD"
-					}
-
-				case constants.SENSOR_DIRT_DETECT:
-					m.dirtLvl.Percent = int(d[i] * 100 / 255)
-
-				case constants.SENSOR_ANGLE:
-					m.movSensor.Data[3] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_DISTANCE:
-					m.movSensor.Data[4] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_REQUESTED_RADIUS:
-					m.movSensor.Data[2] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_LEFT_ENCODER:
-					m.movSensor.Data[0] = int(int16(d[i])<<8 | int16(d[i+1]))
-
-				case constants.SENSOR_RIGHT_ENCODER:
-					m.movSensor.Data[1] = int(int16(d[i])<<8 | int16(d[i+1]))
+			case constants.SENSOR_CHARGING:
+				ch, ok := constants.CHARGING_STATE[d[0]]
+				if !ok {
+					m.battState.Rows[4][1] = "Unknown"
 				}
-				i = i + constants.SENSOR_PACKET_LENGTH[p]
+				m.battState.Rows[4][1] = ch
+
+			case constants.SENSOR_BATTERY_CHARGE:
+				bc := uint16(d[0])<<8 | uint16(d[1])
+				battMaxPlot = battMaxPlot + 1
+				perc := float64(0)
+				if battCap > 0 {
+					perc = float64(bc) * 100 / float64(battCap)
+				}
+				if battMaxPlot%20 == 0 {
+					m.battLvl.Data = append(m.battLvl.Data, toFixed(perc, 2))
+					if battMaxPlot%1200 == 0 {
+						m.battLvl.Data = []float64{}
+					}
+				}
+				m.battMeter.Percent = int(perc)
+				m.battMeter.Label = fmt.Sprintf(" %.2f%% %d/%d mAh", perc, bc, battCap)
+
+			case constants.SENSOR_IR_OMNI:
+				n, ok := constants.IR_CODE_NAMES[d[0]]
+				if !ok {
+					n = "unknown"
+				}
+				m.irCode.Rows[1][1] = n
+
+			case constants.SENSOR_IR_LEFT:
+				n, ok := constants.IR_CODE_NAMES[d[0]]
+				if !ok {
+					n = "unknown"
+				}
+				m.irCode.Rows[2][1] = n
+
+			case constants.SENSOR_IR_RIGHT:
+				n, ok := constants.IR_CODE_NAMES[d[0]]
+				if !ok {
+					n = "unknown"
+				}
+				m.irCode.Rows[3][1] = n
+
+			case constants.SENSOR_OI_MODE:
+				mode, ok := constants.OI_MODE[d[0]]
+				if !ok {
+					m.modeDisp.Text = "Unknown Mode"
+					break
+				}
+				m.modeDisp.Text = "Mode:" + mode
+
+			case constants.SENSOR_CLIFF_LEFT_SIGNAL:
+				m.cliffSensor.Rows[1][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_CLIFF_FRONT_LEFT_SIGNAL:
+				m.cliffSensor.Rows[2][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_CLIFF_FRONT_RIGHT_SIGNAL:
+				m.cliffSensor.Rows[3][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_CLIFF_RIGHT_SIGNAL:
+				m.cliffSensor.Rows[4][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_WALL_SIGNAL:
+				m.cliffSensor.Rows[5][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_CLIFF_LEFT:
+				if d[0] == 1 {
+					m.cliffSensor.BgColors[1] = ui.ColorRed
+					break
+				}
+				m.cliffSensor.BgColors[1] = ui.ColorDefault
+
+			case constants.SENSOR_CLIFF_FRONT_LEFT:
+				if d[0] == 1 {
+					m.cliffSensor.BgColors[2] = ui.ColorRed
+					break
+				}
+				m.cliffSensor.BgColors[2] = ui.ColorDefault
+
+			case constants.SENSOR_CLIFF_FRONT_RIGHT:
+				if d[0] == 1 {
+					m.cliffSensor.BgColors[3] = ui.ColorRed
+					break
+				}
+				m.cliffSensor.BgColors[3] = ui.ColorDefault
+
+			case constants.SENSOR_CLIFF_RIGHT:
+				if d[0] == 1 {
+					m.cliffSensor.BgColors[4] = ui.ColorRed
+					break
+				}
+				m.cliffSensor.BgColors[4] = ui.ColorDefault
+
+			case constants.SENSOR_WALL:
+				if d[0] == 1 {
+					m.cliffSensor.BgColors[5] = ui.ColorRed
+					break
+				}
+				m.cliffSensor.BgColors[5] = ui.ColorDefault
+
+			case constants.SENSOR_WHEEL_OVERCURRENT:
+				m.ocSensor.BgColors[1] = ui.ColorDefault
+				m.ocSensor.BgColors[2] = ui.ColorDefault
+				m.ocSensor.BgColors[3] = ui.ColorDefault
+				m.ocSensor.BgColors[4] = ui.ColorDefault
+				switch {
+				case d[0]&1 > 0:
+					m.ocSensor.BgColors[4] = ui.ColorRed
+				case d[0]&4 > 0:
+					m.ocSensor.BgColors[3] = ui.ColorRed
+				case d[0]&8 > 0:
+					m.ocSensor.BgColors[2] = ui.ColorRed
+				case d[0]&16 > 0:
+					m.ocSensor.BgColors[1] = ui.ColorRed
+				}
+
+			case constants.SENSOR_BUMP_WHEELS_DROPS:
+				idx := 1
+				for offset := byte(1); offset <= 8; offset = offset << 1 {
+					m.wheelSensor.BgColors[idx] = ui.ColorDefault
+					if d[0]&offset > 0 {
+						m.wheelSensor.BgColors[idx] = ui.ColorRed
+					}
+					idx++
+				}
+
+			case constants.SENSOR_BUMPER:
+				idx := 1
+				for offset := byte(1); offset <= 32; offset = offset << 1 {
+					m.bumpSensor.BgColors[idx] = ui.ColorDefault
+					if d[0]&offset > 0 {
+						m.bumpSensor.BgColors[idx] = ui.ColorRed
+					}
+					idx++
+				}
+
+			case constants.SENSOR_BUMP_LEFT:
+				m.bumpSensor.Rows[1][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_BUMP_FRONT_LEFT:
+				m.bumpSensor.Rows[2][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_BUMP_CENTER_LEFT:
+				m.bumpSensor.Rows[3][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_BUMP_CENTER_RIGHT:
+				m.bumpSensor.Rows[4][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_BUMP_FRONT_RIGHT:
+				m.bumpSensor.Rows[5][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_BUMP_RIGHT:
+				m.bumpSensor.Rows[6][1] = fmt.Sprintf("%d", uint16(d[0])<<8|uint16(d[1]))
+
+			case constants.SENSOR_LEFT_MOTOR_CURRENT:
+				m.currSensor.Data[0] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_RIGHT_MOTOR_CURRENT:
+				m.currSensor.Data[1] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_MAIN_BRUSH_MOTOR_CURRENT:
+				m.currSensor.Data[2] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_SIDE_BRUSH_MOTOR_CURRENT:
+				m.currSensor.Data[3] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_REQUESTED_VELOCITY:
+				m.velSensor.Data[0] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_REQUESTED_RIGHT_VELOCITY:
+				m.velSensor.Data[1] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_REQUESTED_LEFT_VELOCITY:
+				m.velSensor.Data[2] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_STASIS:
+				switch d[0] {
+				case 0:
+					m.stasis.Text = "Stasis:BWD/TURN"
+				case 1:
+					m.stasis.Text = "Stasis:FWD"
+				}
+
+			case constants.SENSOR_DIRT_DETECT:
+				m.dirtLvl.Percent = int(d[0] * 100 / 255)
+
+			case constants.SENSOR_ANGLE:
+				m.movSensor.Data[3] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_DISTANCE:
+				m.movSensor.Data[4] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_REQUESTED_RADIUS:
+				m.movSensor.Data[2] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_LEFT_ENCODER:
+				m.movSensor.Data[0] = int(int16(d[0])<<8 | int16(d[1]))
+
+			case constants.SENSOR_RIGHT_ENCODER:
+				m.movSensor.Data[1] = int(int16(d[0])<<8 | int16(d[1]))
 			}
 			ui.Body.Align()
 			ui.Render(m.velSensor)
