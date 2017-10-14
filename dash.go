@@ -5,10 +5,10 @@ import (
 	"math"
 	"time"
 
+	roomba "github.com/deepakkamesh/go-roomba"
+	"github.com/deepakkamesh/go-roomba/constants"
 	ui "github.com/gizak/termui"
 	"github.com/golang/glog"
-	"github.com/xa4a/go-roomba"
-	"github.com/xa4a/go-roomba/constants"
 )
 
 type Dash struct {
